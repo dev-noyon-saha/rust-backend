@@ -1,15 +1,15 @@
 pub mod error;
 pub mod handlers;
 pub mod response;
-pub mod state;
 
-use axum::{Router, http::StatusCode, routing::get};
+use axum::{Router, extract::FromRef, http::StatusCode, routing::get};
 
 use tower_http::trace::TraceLayer;
 
-use self::{error::ApiError, state::AppState};
+use crate::app::state::{AppState, HealthState};
 
-// Handle unknown endpoints
+use self::error::ApiError;
+
 async fn not_found() -> ApiError {
     ApiError::new(
         StatusCode::NOT_FOUND,
@@ -18,7 +18,6 @@ async fn not_found() -> ApiError {
     )
 }
 
-// Handle unsupported HTTP methods
 async fn method_not_allowed() -> ApiError {
     ApiError::new(
         StatusCode::METHOD_NOT_ALLOWED,
@@ -27,16 +26,26 @@ async fn method_not_allowed() -> ApiError {
     )
 }
 
-// Register API routes
-pub fn router() -> Router {
-    // Initialize application state once
-    let app_state = AppState::new();
-
-    Router::new()
+// Common route definitions
+fn build_router<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+    HealthState: FromRef<S>,
+{
+    Router::<S>::new()
         .route("/", get(handlers::root::root))
         .route("/health", get(handlers::health::health))
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
         .layer(TraceLayer::new_for_http())
-        .with_state(app_state)
+}
+
+// Lightweight router for HTTP tests
+pub fn router() -> Router {
+    build_router::<HealthState>().with_state(HealthState::new())
+}
+
+// Production router with real dependencies
+pub fn router_with_state(state: AppState) -> Router {
+    build_router::<AppState>().with_state(state)
 }

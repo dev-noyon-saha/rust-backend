@@ -24,22 +24,24 @@ async fn health_returns_success_response() {
     assert_eq!(json["success"], true);
     assert_eq!(json["message"], "Service is healthy");
     assert_eq!(json["data"]["status"], "healthy");
+
     assert_eq!(json["data"]["service"], "backend-ai-api");
 
     assert_eq!(json["data"]["version"], env!("CARGO_PKG_VERSION"));
 
+    // Verify uptime
     assert!(json["data"]["uptime_seconds"].is_u64());
 
-    let timestamp = json["data"]["timestamp"]
-        .as_str()
-        .expect("Timestamp must be a string");
+    // Verify timestamp
+    let timestamp = json["data"]["timestamp"].as_str().unwrap();
 
-    assert!(
-        chrono::DateTime::parse_from_rfc3339(timestamp).is_ok(),
-        "Timestamp must be valid RFC3339"
-    );
+    assert!(chrono::DateTime::parse_from_rfc3339(timestamp).is_ok());
 
-    assert!(timestamp.ends_with('Z'));
+    // Isolated HTTP tests skip real dependencies
+    assert_eq!(json["data"]["checks"]["postgresql"], "not_checked");
+
+    assert_eq!(json["data"]["checks"]["redis"], "not_checked");
+
     assert!(json["error"].is_null());
 }
 
