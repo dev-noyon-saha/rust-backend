@@ -1,10 +1,13 @@
+use std::time::Duration;
+
 use axum::{
     body::{Body, to_bytes},
+    extract::FromRef,
     http::{Request, StatusCode},
 };
 
 use backend_project::{
-    app::state::AppState,
+    app::state::{AppState, HealthState},
     config::Settings,
     http,
     infrastructure::{cache::redis as redis_cache, database::postgres},
@@ -12,36 +15,42 @@ use backend_project::{
 
 use tower::ServiceExt;
 
-// Helper to load environment settings
 fn settings() -> Settings {
     dotenvy::dotenv().ok();
 
     Settings::from_env().expect("Failed to load configuration")
 }
 
-// Verify real dependencies and production health
 #[tokio::test]
 async fn app_state_integration_test() {
-    let config = settings();
+    let mut config = settings();
 
-    // Connect PostgreSQL
-    let db = postgres::connect(&config.database_url)
+    // Override health timeout for this test.
+    config.health.check_timeout = Duration::from_secs(4);
+
+    // Use typed PostgreSQL configuration.
+    let db = postgres::connect_with_config(&config.database)
         .await
         .expect("PostgreSQL connection failed");
 
-    // Connect Redis
-    let redis_manager = redis_cache::connect(&config.redis_url)
+    // Use typed Redis configuration.
+    let redis_manager = redis_cache::connect_with_config(&config.redis)
         .await
         .expect("Redis connection failed");
 
-    // Create shared AppState
-    let state = AppState::new(db.clone(), redis_manager);
+    let state =
+        AppState::with_health_timeout(db.clone(), redis_manager, config.health.check_timeout);
 
     let cloned_state = state.clone();
 
     assert_eq!(state.started_at, cloned_state.started_at);
 
-    // Verify PostgreSQL from shared state
+    // Verify configured timeout reaches HealthState.
+    let health_state = HealthState::from_ref(&state);
+
+    assert_eq!(health_state.check_timeout, Duration::from_secs(4));
+
+    // Verify PostgreSQL.
     let result: i32 = sqlx::query_scalar("SELECT 1")
         .fetch_one(&cloned_state.db)
         .await
@@ -49,7 +58,7 @@ async fn app_state_integration_test() {
 
     assert_eq!(result, 1);
 
-    // Verify Redis from shared state
+    // Verify Redis.
     let mut redis = cloned_state.redis.clone();
 
     let pong: String = redis::cmd("PING")
@@ -59,7 +68,7 @@ async fn app_state_integration_test() {
 
     assert_eq!(pong, "PONG");
 
-    // Build production router
+    // Test production HTTP router.
     let app = http::router_with_state(state);
 
     let request = Request::builder()
@@ -67,7 +76,7 @@ async fn app_state_integration_test() {
         .body(Body::empty())
         .unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
+    let response = app.oneshot(request).await.expect("HTTP request failed");
 
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -87,23 +96,22 @@ async fn app_state_integration_test() {
     db.close().await;
 }
 
-// Verify 503 when PostgreSQL pool is unavailable
 #[tokio::test]
 async fn health_returns_503_when_postgres_fails() {
     let config = settings();
 
-    let db = postgres::connect(&config.database_url)
+    let db = postgres::connect_with_config(&config.database)
         .await
         .expect("PostgreSQL connection failed");
 
-    let redis_manager = redis_cache::connect(&config.redis_url)
+    let redis_manager = redis_cache::connect_with_config(&config.redis)
         .await
         .expect("Redis connection failed");
 
-    let state = AppState::new(db.clone(), redis_manager);
+    let state =
+        AppState::with_health_timeout(db.clone(), redis_manager, config.health.check_timeout);
 
-    // Simulate PostgreSQL failure locally.
-    // This closes only this test's pool.
+    // Close only this test's PostgreSQL pool.
     db.close().await;
 
     let app = http::router_with_state(state);
@@ -113,7 +121,7 @@ async fn health_returns_503_when_postgres_fails() {
         .body(Body::empty())
         .unwrap();
 
-    let response = app.oneshot(request).await.unwrap();
+    let response = app.oneshot(request).await.expect("HTTP request failed");
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 

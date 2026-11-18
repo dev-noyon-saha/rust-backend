@@ -1,16 +1,21 @@
-use std::env;
+mod database;
+mod environment;
+mod health;
+mod redis;
+mod secrets;
+mod security;
+mod server;
+mod settings;
+mod validation;
 
-#[derive(Debug, Clone)]
-pub struct Settings {
-    pub database_url: String,
-    pub redis_url: String,
-}
+pub use database::DatabaseConfig;
 
-impl Settings {
-    pub fn from_env() -> Result<Self, env::VarError> {
-        Ok(Self {
-            database_url: env::var("DATABASE_URL")?,
-            redis_url: env::var("REDIS_URL")?,
-        })
-    }
-}
+pub use environment::{Environment, EnvironmentParseError};
+
+pub use health::HealthConfig;
+pub use redis::RedisConfig;
+pub use secrets::SecretString;
+pub use security::SecurityConfig;
+pub use server::ServerConfig;
+
+pub use settings::{EnvironmentVariableFailure, Settings, SettingsError};

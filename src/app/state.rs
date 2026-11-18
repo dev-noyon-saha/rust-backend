@@ -1,50 +1,67 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::FromRef;
 use redis::aio::ConnectionManager;
 use sqlx::PgPool;
 
-/// Shared application state for production.
+use crate::config::HealthConfig;
+
+/// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
     pub started_at: Instant,
     pub db: PgPool,
     pub redis: ConnectionManager,
+    pub health_check_timeout: Duration,
 }
 
 impl AppState {
+    /// Construct state using default health configuration.
+    ///
+    /// Preserved for backward compatibility.
     pub fn new(db: PgPool, redis: ConnectionManager) -> Self {
+        let timeout = HealthConfig::default().check_timeout;
+
+        Self::with_health_timeout(db, redis, timeout)
+    }
+
+    /// Construct state with a custom health timeout.
+    pub fn with_health_timeout(
+        db: PgPool,
+        redis: ConnectionManager,
+        health_check_timeout: Duration,
+    ) -> Self {
         Self {
             started_at: Instant::now(),
             db,
             redis,
+            health_check_timeout,
         }
     }
 }
 
-/// Dependencies required for operational health checks.
+/// Dependencies required by the health endpoint.
 #[derive(Clone)]
 pub struct HealthDependencies {
     pub db: PgPool,
     pub redis: ConnectionManager,
 }
 
-/// Lightweight health state.
-///
-/// In production, dependencies are available.
-/// In isolated HTTP tests, they can be omitted.
+/// Health-specific state.
 #[derive(Clone)]
 pub struct HealthState {
     pub started_at: Instant,
     pub dependencies: Option<HealthDependencies>,
+    pub check_timeout: Duration,
 }
 
 impl HealthState {
-    /// Create an isolated state without database access.
+    /// Lightweight state for isolated HTTP tests.
     pub fn new() -> Self {
         Self {
             started_at: Instant::now(),
             dependencies: None,
+            check_timeout: HealthConfig::default().check_timeout,
         }
     }
 }
@@ -64,6 +81,7 @@ impl FromRef<AppState> for HealthState {
                 db: state.db.clone(),
                 redis: state.redis.clone(),
             }),
+            check_timeout: state.health_check_timeout,
         }
     }
 }

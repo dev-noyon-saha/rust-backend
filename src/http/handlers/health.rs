@@ -13,17 +13,12 @@ use crate::{
     http::response::{ApiErrorInfo, ApiResponse},
 };
 
-// Maximum time allowed per dependency check
-const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
-
-// Dependency health status
 #[derive(Debug, Serialize)]
 pub struct HealthChecks {
     pub postgresql: &'static str,
     pub redis: &'static str,
 }
 
-// Health response data
 #[derive(Debug, Serialize)]
 pub struct HealthData {
     pub status: &'static str,
@@ -34,10 +29,10 @@ pub struct HealthData {
     pub checks: HealthChecks,
 }
 
-// Check PostgreSQL connectivity
-async fn check_postgres(db: &PgPool) -> &'static str {
+/// Check PostgreSQL with the configured timeout.
+async fn check_postgres(db: &PgPool, check_timeout: Duration) -> &'static str {
     let result = timeout(
-        HEALTH_CHECK_TIMEOUT,
+        check_timeout,
         sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(db),
     )
     .await;
@@ -48,15 +43,14 @@ async fn check_postgres(db: &PgPool) -> &'static str {
     }
 }
 
-// Check Redis connectivity
-async fn check_redis(manager: &ConnectionManager) -> &'static str {
+/// Check Redis with the configured timeout.
+async fn check_redis(manager: &ConnectionManager, check_timeout: Duration) -> &'static str {
     let mut connection = manager.clone();
 
-    let result = timeout(HEALTH_CHECK_TIMEOUT, async {
-        let pong: String = redis::cmd("PING").query_async(&mut connection).await?;
-
-        Ok::<String, redis::RedisError>(pong)
-    })
+    let result = timeout(
+        check_timeout,
+        redis::cmd("PING").query_async::<String>(&mut connection),
+    )
     .await;
 
     match result {
@@ -65,33 +59,29 @@ async fn check_redis(manager: &ConnectionManager) -> &'static str {
     }
 }
 
-// GET /health
+/// GET /health
 pub async fn health(
     State(state): State<HealthState>,
 ) -> (StatusCode, Json<ApiResponse<HealthData>>) {
-    // Calculate uptime
     let uptime_seconds = state.started_at.elapsed().as_secs();
 
-    // Generate UTC timestamp
     let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
-    // Check dependencies in parallel
+    // Run dependency checks concurrently.
     let (postgresql, redis) = match &state.dependencies {
         Some(dependencies) => {
             tokio::join!(
-                check_postgres(&dependencies.db),
-                check_redis(&dependencies.redis),
+                check_postgres(&dependencies.db, state.check_timeout,),
+                check_redis(&dependencies.redis, state.check_timeout,),
             )
         }
 
-        // Lightweight HTTP test router
+        // Isolated HTTP tests without dependencies.
         None => ("not_checked", "not_checked"),
     };
 
-    // Dependency availability
     let is_healthy = postgresql != "unhealthy" && redis != "unhealthy";
 
-    // Build health response
     let data = HealthData {
         status: if is_healthy { "healthy" } else { "unhealthy" },
         service: "backend-ai-api",
@@ -101,7 +91,6 @@ pub async fn health(
         checks: HealthChecks { postgresql, redis },
     };
 
-    // Return 200 when healthy
     if is_healthy {
         return (
             StatusCode::OK,
@@ -109,16 +98,16 @@ pub async fn health(
         );
     }
 
-    // Return 503 when a dependency fails
-    let response = ApiResponse {
-        success: false,
-        message: "Service is unhealthy".to_string(),
-        data: Some(data),
-        error: Some(ApiErrorInfo {
-            code: "SERVICE_UNAVAILABLE",
-            details: None,
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ApiResponse {
+            success: false,
+            message: "Service is unhealthy".to_string(),
+            data: Some(data),
+            error: Some(ApiErrorInfo {
+                code: "SERVICE_UNAVAILABLE",
+                details: None,
+            }),
         }),
-    };
-
-    (StatusCode::SERVICE_UNAVAILABLE, Json(response))
+    )
 }
